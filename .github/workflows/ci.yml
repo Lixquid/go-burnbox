@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Verify formatting (gofmt)
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -v ./...
+
+  build:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    needs: ci
+    strategy:
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            ext: .exe
+          - goos: windows
+            goarch: arm64
+            ext: .exe
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            ext: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -o BurnBox-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BurnBox-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: BurnBox-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
