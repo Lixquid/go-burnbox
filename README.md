@@ -43,3 +43,7 @@ Run the tests:
 ```sh
 go test ./...
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
