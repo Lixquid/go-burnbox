@@ -12,13 +12,20 @@ Expired entries are sent to the system trash:
 
 ## Usage
 
+BurnBox uses a subcommand pattern. Without a subcommand it prints usage information. The daemon only starts when you explicitly use the `start` subcommand. Passing `-h` or `--help` to any subcommand shows usage for that subcommand:
+
 ```sh
-BurnBox [flags]
+BurnBox start [flags]
+BurnBox help
 ```
+
+### `start`
+
+Starts the daemon (`BurnBox start --help` shows this list):
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--folder` | `~/BurnBox` | Folder path to watch (top-level only). Created if missing. |
+| `--folder` | `~/BurnBox` | Folder path to watch. Created if missing. |
 | `--expiration` | `24h` | Duration measured from when BurnBox first saw the entry (e.g. `30m`, `24h`). |
 | `--ignore` | `.directory` | Comma-separated list of filenames to never touch. |
 | `--force` | `false` | Delete instead of sending to the trash. |
@@ -27,7 +34,7 @@ BurnBox [flags]
 Example:
 
 ```sh
-BurnBox --folder /tmp/drop --expiration 30m
+BurnBox start --folder /tmp/drop --expiration 30m
 ```
 
 ## Run at startup
@@ -37,7 +44,7 @@ BurnBox --folder /tmp/drop --expiration 30m
 Scheduled task at logon:
 
 ```sh
-schtasks /Create /TN "BurnBox" /SC ONLOGON /TR "C:\Tools\BurnBox\BurnBox.exe --folder C:\Users\you\BurnBox" /RL LIMITED /F
+schtasks /Create /TN "BurnBox" /SC ONLOGON /TR "C:\Tools\BurnBox\BurnBox.exe start --folder C:\Users\you\BurnBox" /RL LIMITED /F
 ```
 
 Or place a shortcut in the Startup folder (`shell:startup`). Use `/RL HIGHEST` if elevated access is needed; remove with `schtasks /Delete /TN "BurnBox" /F`.
@@ -56,6 +63,7 @@ Create `~/Library/LaunchAgents/com.lixquid.burnbox.plist`:
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/bin/BurnBox</string>
+        <string>start</string>
         <string>--folder</string>
         <string>/Users/you/BurnBox</string>
     </array>
@@ -85,7 +93,7 @@ Create `~/.config/systemd/user/burnbox.service`:
 Description=BurnBox
 
 [Service]
-ExecStart=%h/bin/BurnBox --folder %h/BurnBox
+ExecStart=%h/bin/BurnBox start --folder %h/BurnBox
 Restart=on-failure
 
 [Install]

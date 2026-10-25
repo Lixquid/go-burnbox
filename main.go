@@ -1,4 +1,4 @@
-// BurnBox: watches a folder (top-level only, no recursion) and
+// BurnBox: watches a folder and
 // trashes or deletes entries a configurable duration after BurnBox
 // first saw them. The first-seen times are persisted in a JSON store so
 // timers survive restarts.
@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"os"
 	"os/user"
@@ -22,7 +23,7 @@ import (
 
 // Config holds all runtime settings for the janitor.
 type Config struct {
-	Folder     string        // folder to watch (top-level only)
+	Folder     string        // folder to watch
 	Expiration time.Duration // how long after first sight an entry may live
 	Ignore     []string      // filenames to never touch
 	Force      bool          // force delete (skip trash)
@@ -157,22 +158,77 @@ func (s *store) peekAll() map[string]time.Time {
 }
 
 func main() {
-	cfg, err := parseFlags(flag.CommandLine, os.Args[1:])
-	if err != nil {
-		log.Fatalf("%v", err)
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// run routes a subcommand and returns the process exit code. Split out
+// from main so tests can drive the CLI without running the daemon.
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printUsage(stderr)
+		fmt.Fprintln(stderr, "\nerror: no subcommand given")
+		return 2
 	}
-
-	log.Printf("BurnBox starting: folder=%q expiration=%s ignore=%v force=%t store=%q",
-		cfg.Folder, cfg.Expiration, cfg.Ignore, cfg.Force, cfg.StorePath)
-
-	if err := runJanitor(cfg, nil); err != nil {
-		log.Fatalf("%v", err)
+	switch args[0] {
+	case "start":
+		for _, a := range args[1:] {
+			if a == "-h" || a == "--help" {
+				printStartUsage(stdout)
+				return 0
+			}
+		}
+		cfg, err := parseFlags(flag.CommandLine, args[1:])
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 2
+		}
+		log.Printf("BurnBox starting: folder=%q expiration=%s ignore=%v force=%t store=%q",
+			cfg.Folder, cfg.Expiration, cfg.Ignore, cfg.Force, cfg.StorePath)
+		if err := runJanitor(cfg, nil); err != nil {
+			log.Fatalf("%v", err)
+		}
+		return 0
+	case "help", "-h", "--help":
+		printUsage(stdout)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "error: unknown subcommand %q\n\n", args[0])
+		printUsage(stderr)
+		return 2
 	}
 }
 
-// parseFlags builds the Config from a flag set and argument list, with
-// the required defaults. Split out from main so tests can drive it.
-func parseFlags(fs *flag.FlagSet, args []string) (Config, error) {
+// printUsage writes the CLI usage information.
+func printUsage(w io.Writer) {
+	fmt.Fprintf(w, `Usage: %s <command> [flags]
+
+Commands:
+  start           start the BurnBox daemon: watch the folder and trash
+                  (or delete) entries after their expiration
+  help            show this help
+
+Passing "-h" or "--help" to any subcommand shows usage for that
+subcommand.
+`, filepath.Base(os.Args[0]))
+}
+
+// printStartUsage writes the usage information for the start subcommand.
+func printStartUsage(w io.Writer) {
+	fmt.Fprintf(w, `Usage: %s start [flags]
+
+Starts the BurnBox daemon: watches the folder and
+trashes or deletes each entry after its expiration, measured from when
+BurnBox first saw it.
+
+Flags:
+`, filepath.Base(os.Args[0]))
+	fs := flag.NewFlagSet("start", flag.ContinueOnError)
+	fs.SetOutput(w)
+	registerStartFlags(fs)
+	fs.PrintDefaults()
+}
+
+func registerStartFlags(fs *flag.FlagSet) (folder *string, expire *time.Duration, ignore *string, force *bool, storeP *string) {
 	home := "."
 	if u, err := user.Current(); err == nil && u.HomeDir != "" {
 		home = u.HomeDir
@@ -180,13 +236,18 @@ func parseFlags(fs *flag.FlagSet, args []string) (Config, error) {
 		home = h
 	}
 
-	var (
-		folder = fs.String("folder", filepath.Join(home, "BurnBox"), "folder path to watch (top-level only)")
-		expire = fs.Duration("expiration", 24*time.Hour, "expiration duration measured from when BurnBox first saw the file (e.g. 24h, 30m)")
-		ignore = fs.String("ignore", ".directory", "comma-separated list of filenames to ignore")
-		force  = fs.Bool("force", false, "force delete instead of trashing")
-		storeP = fs.String("store", "", "path of the first-seen store (default: <user cache dir>/BurnBox/store-<folder>.json)")
-	)
+	folder = fs.String("folder", filepath.Join(home, "BurnBox"), "folder path to watch")
+	expire = fs.Duration("expiration", 24*time.Hour, "expiration duration measured from when BurnBox first saw the file (e.g. 24h, 30m)")
+	ignore = fs.String("ignore", ".directory", "comma-separated list of filenames to ignore")
+	force = fs.Bool("force", false, "force delete instead of trashing")
+	storeP = fs.String("store", "", "path of the first-seen store (default: <user cache dir>/BurnBox/store-<folder>.json)")
+	return
+}
+
+// parseFlags builds the Config from a flag set and argument list, with
+// the required defaults. Split out from main so tests can drive it.
+func parseFlags(fs *flag.FlagSet, args []string) (Config, error) {
+	folder, expire, ignore, force, storeP := registerStartFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -222,7 +283,7 @@ func parseFlags(fs *flag.FlagSet, args []string) (Config, error) {
 }
 
 // runJanitor is the daemon: it prepares the folder and trash, loads and
-// syncs the first-seen store, then watches the folder (top-level only)
+// syncs the first-seen store, then watches the folder
 // and reaps expired entries. It returns when stop is closed (nil means
 // run forever) or when the watcher terminates.
 func runJanitor(cfg Config, stop <-chan struct{}) error {
@@ -235,7 +296,7 @@ func runJanitor(cfg Config, stop <-chan struct{}) error {
 		return fmt.Errorf("cannot resolve watch folder: %w", err)
 	}
 	cfg.Folder = abs
-	log.Printf("watching (top-level only): %s", cfg.Folder)
+	log.Printf("watching: %s", cfg.Folder)
 
 	// Fail fast if trashing is required but no trash location is usable.
 	if cfg.Force {

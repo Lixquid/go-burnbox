@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"io"
 	"log"
@@ -577,5 +578,60 @@ func TestRunJanitorStartupSyncNewFileSeenNow(t *testing.T) {
 	}
 	if got.Before(start.Add(-5 * time.Second)) {
 		t.Fatalf("first-seen should be ~now, got %v", got)
+	}
+}
+
+// --- CLI routing tests ---
+
+func TestRunNoSubcommand(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	code := run(nil, stdout, stderr)
+	if code != 2 {
+		t.Fatalf("no subcommand: want exit code 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "Usage:") {
+		t.Fatalf("no subcommand: usage should be printed, got %q", stderr.String())
+	}
+}
+
+func TestRunUnknownSubcommand(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	code := run([]string{"frobnicate"}, stdout, stderr)
+	if code != 2 {
+		t.Fatalf("unknown subcommand: want exit code 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "unknown subcommand") || !strings.Contains(stderr.String(), "Usage:") {
+		t.Fatalf("unknown subcommand: want error and usage on stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunHelp(t *testing.T) {
+	for _, arg := range []string{"help", "-h", "--help"} {
+		stdout := &bytes.Buffer{}
+		stderr := &bytes.Buffer{}
+		code := run([]string{arg}, stdout, stderr)
+		if code != 0 {
+			t.Fatalf("%q: want exit code 0, got %d", arg, code)
+		}
+		if !strings.Contains(stdout.String(), "start") {
+			t.Fatalf("%q: usage should mention the start subcommand, got %q", arg, stdout.String())
+		}
+	}
+}
+
+func TestRunStartHelp(t *testing.T) {
+	for _, arg := range []string{"-h", "--help"} {
+		stdout := &bytes.Buffer{}
+		stderr := &bytes.Buffer{}
+		code := run([]string{"start", arg}, stdout, stderr)
+		if code != 0 {
+			t.Fatalf("start %q: want exit code 0, got %d", arg, code)
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "Usage: ") || !strings.Contains(out, "daemon") || !strings.Contains(out, "-folder") || !strings.Contains(out, "-expiration") {
+			t.Fatalf("start %q: want start usage with description and flag list, got %q", arg, out)
+		}
 	}
 }
