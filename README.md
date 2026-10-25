@@ -16,6 +16,7 @@ BurnBox uses a subcommand pattern. Without a subcommand it prints usage informat
 
 ```sh
 BurnBox start [flags]
+BurnBox status [flags]
 BurnBox help
 ```
 
@@ -36,6 +37,27 @@ Example:
 ```sh
 BurnBox start --folder /tmp/drop --expiration 30m
 ```
+
+### `status`
+
+Reports every entry in the burnbox and how long it has until deletion, according to the first-seen store. It accepts the same `--folder`, `--expiration`, `--ignore`, and `--store` flags as `start` (but not `--force`, which has no meaning here), and is read-only: it does not start the daemon, does not create the folder, and does not modify the store.
+
+Example output:
+
+```sh
+$ BurnBox status --folder /tmp/drop --expiration 30m
+BurnBox: /tmp/drop
+Entries expire 30m0s after first seen (expiration 30m0s)
+
+NAME    DELETES IN  FIRST SEEN
+a.txt   12m5s       2024-01-01T10:00:00Z
+b.log   expired     2024-01-01T09:00:00Z
+c.txt   untracked   -
+```
+
+Entries shown as `untracked` are in the folder but have no first-seen time in the store yet (e.g. they appeared while BurnBox was not running); the daemon assigns them a first-seen time on its next start. Entries still in the store but missing from the folder are listed at the bottom and are pruned when the daemon next starts.
+
+BurnBox status --help shows this flag list.
 
 ## Run at startup
 

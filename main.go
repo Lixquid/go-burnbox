@@ -188,6 +188,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			log.Fatalf("%v", err)
 		}
 		return 0
+	case "status":
+		return runStatus(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return 0
@@ -205,6 +207,8 @@ func printUsage(w io.Writer) {
 Commands:
   start           start the BurnBox daemon: watch the folder and trash
                   (or delete) entries after their expiration
+  status          report the entries in the burnbox and how long they
+                  have until deletion
   help            show this help
 
 Passing "-h" or "--help" to any subcommand shows usage for that

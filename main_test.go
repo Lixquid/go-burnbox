@@ -635,3 +635,171 @@ func TestRunStartHelp(t *testing.T) {
 		}
 	}
 }
+
+// --- status subcommand tests ---
+
+func TestStatusParseFlags(t *testing.T) {
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	cfg, err := parseStatusFlags(fs, []string{
+		"-folder", "/tmp/watchme",
+		"-expiration", "5m",
+		"-ignore", "a.txt,b.txt",
+		"-store", "/tmp/store.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Folder != "/tmp/watchme" {
+		t.Fatalf("folder: got %q", cfg.Folder)
+	}
+	if cfg.Expiration != 5*time.Minute {
+		t.Fatalf("expiration: got %s", cfg.Expiration)
+	}
+	if len(cfg.Ignore) != 2 || cfg.Ignore[0] != "a.txt" || cfg.Ignore[1] != "b.txt" {
+		t.Fatalf("ignore list: got %v", cfg.Ignore)
+	}
+	if cfg.StorePath != "/tmp/store.json" {
+		t.Fatalf("store: got %q", cfg.StorePath)
+	}
+}
+
+func TestStatusParseFlagsDefaults(t *testing.T) {
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	cfg, err := parseStatusFlags(fs, []string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Expiration != 24*time.Hour {
+		t.Fatalf("default expiration: want 24h, got %s", cfg.Expiration)
+	}
+	if filepath.Base(cfg.Folder) != "BurnBox" {
+		t.Fatalf("default folder should end in BurnBox, got %q", cfg.Folder)
+	}
+	if len(cfg.Ignore) != 1 || cfg.Ignore[0] != ".directory" {
+		t.Fatalf("default ignore list: want [.directory], got %v", cfg.Ignore)
+	}
+	if cfg.StorePath == "" {
+		t.Fatal("default store path must not be empty")
+	}
+}
+
+func TestFormatRemaining(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want string
+	}{
+		{-time.Second, "expired"},
+		{0, "expired"},
+		{59 * time.Second, "59s"},
+		{60 * time.Second, "1m"},
+		{61 * time.Second, "1m1s"},
+		{25 * time.Hour, "1d1h"},
+		{25*time.Hour + 61*time.Second, "1d1h1m1s"},
+		{48 * time.Hour, "2d"},
+	}
+	for _, c := range cases {
+		if got := formatRemaining(c.in); got != c.want {
+			t.Errorf("formatRemaining(%s): want %q, got %q", c.in, c.want, got)
+		}
+	}
+}
+
+func TestRunStatusHelp(t *testing.T) {
+	for _, arg := range []string{"-h", "--help"} {
+		stdout := &bytes.Buffer{}
+		stderr := &bytes.Buffer{}
+		code := run([]string{"status", arg}, stdout, stderr)
+		if code != 0 {
+			t.Fatalf("status %q: want exit code 0, got %d", arg, code)
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "Usage: ") || !strings.Contains(out, "-folder") || !strings.Contains(out, "-expiration") || !strings.Contains(out, "-store") {
+			t.Fatalf("status %q: want status usage with flag list, got %q", arg, out)
+		}
+	}
+}
+
+func TestRunStatusBadFlag(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	code := run([]string{"status", "-frobnicate"}, stdout, stderr)
+	if code != 2 {
+		t.Fatalf("status bad flag: want exit code 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "error:") {
+		t.Fatalf("status bad flag: want error on stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunStatusReportsEntries(t *testing.T) {
+	cfg, st := newEnv(t, 24*time.Hour, false)
+
+	// Tracked entry that is already past its expiration, one expiring in
+	// ~23h, and one that the store has never seen (untracked).
+	if err := st.seen("soon.txt", time.Now().Add(-25*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.seen("later.txt", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.save(); err != nil {
+		t.Fatal(err)
+	}
+	touch(t, cfg.Folder, "soon.txt", false)
+	touch(t, cfg.Folder, "later.txt", false)
+	touch(t, cfg.Folder, "untracked.txt", false)
+	// Ignored and store files must not appear.
+	touch(t, cfg.Folder, ".directory", false)
+
+	// A stale store entry for a file that is gone must be reported as
+	// pending prunee.
+	if err := st.seen("gone.txt", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.save(); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	code := run([]string{"status", "-folder", cfg.Folder, "-expiration", "24h", "-store", cfg.StorePath}, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("status: want exit code 0, got %d (stderr %q)", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"soon.txt", "later.txt", "untracked.txt", "untracked", "expired", "gone.txt", "pruned on next start"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("status output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, ".directory") {
+		t.Fatalf("status output should not list ignored entries:\n%s", out)
+	}
+	// soon.txt (expired) deletes sooner than later.txt: ordering check.
+	if strings.Index(out, "soon.txt") > strings.Index(out, "later.txt") {
+		t.Fatalf("status should list soonest deletion first:\n%s", out)
+	}
+	// Read-only: the store must not gain an entry for untracked.txt.
+	st2, err := loadStore(cfg.StorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st2.peekFirstSeen("untracked.txt"); ok {
+		t.Fatal("status must not modify the store")
+	}
+}
+
+func TestRunStatusMissingFolder(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	code := run([]string{"status", "-folder", filepath.Join(t.TempDir(), "nope"), "-store", filepath.Join(t.TempDir(), "store.json")}, stdout, stderr)
+	if code != 1 {
+		t.Fatalf("status missing folder: want exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "cannot list") {
+		t.Fatalf("status missing folder: want error on stderr, got %q", stderr.String())
+	}
+}
