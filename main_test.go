@@ -636,6 +636,72 @@ func TestRunStartHelp(t *testing.T) {
 	}
 }
 
+// --- once subcommand tests ---
+
+func TestRunOnceHelp(t *testing.T) {
+	for _, arg := range []string{"-h", "--help"} {
+		stdout := &bytes.Buffer{}
+		stderr := &bytes.Buffer{}
+		code := run([]string{"once", arg}, stdout, stderr)
+		if code != 0 {
+			t.Fatalf("once %q: want exit code 0, got %d", arg, code)
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "Usage: ") || !strings.Contains(out, "single scan") || !strings.Contains(out, "-folder") || !strings.Contains(out, "-expiration") {
+			t.Fatalf("once %q: want once usage with description and flag list, got %q", arg, out)
+		}
+	}
+}
+
+func TestRunOnceReapsExpiredAndRecordsNew(t *testing.T) {
+	cfg, st := newEnv(t, time.Hour, true)
+
+	// An entry that was first seen far in the past: expired.
+	touch(t, cfg.Folder, "old.txt", false)
+	past := time.Now().Add(-2 * cfg.Expiration)
+	st.firstSeen["old.txt"] = past
+
+	// An entry the store does not know yet: gets a first-seen time now.
+	touch(t, cfg.Folder, "new.txt", false)
+
+	// A file that is in the store but no longer in the folder: pruned.
+	st.firstSeen["gone.txt"] = past
+	if err := st.save(); err != nil {
+		t.Fatal(err)
+	}
+
+	code := run([]string{"once", "-folder", cfg.Folder, "-expiration", cfg.Expiration.String(), "-force", "-store", cfg.StorePath}, &bytes.Buffer{}, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("once: want exit code 0, got %d", code)
+	}
+
+	if _, err := os.Lstat(filepath.Join(cfg.Folder, "old.txt")); !os.IsNotExist(err) {
+		t.Fatalf("once should have removed expired old.txt, err=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(cfg.Folder, "new.txt")); err != nil {
+		t.Fatalf("new.txt should survive the scan: %v", err)
+	}
+
+	st, err := loadStore(cfg.StorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := st.peekAll()
+	if _, ok := all["old.txt"]; ok {
+		t.Fatal("once should have forgotten old.txt after removing it")
+	}
+	if _, ok := all["gone.txt"]; ok {
+		t.Fatal("once should have pruned gone.txt from the store")
+	}
+	at, ok := all["new.txt"]
+	if !ok {
+		t.Fatal("once should have recorded a first-seen time for new.txt")
+	}
+	if d := time.Since(at); d < 0 || d > time.Minute {
+		t.Fatalf("new.txt first seen should be about now, got %s", at)
+	}
+}
+
 // --- status subcommand tests ---
 
 func TestStatusParseFlags(t *testing.T) {

@@ -18,6 +18,7 @@ BurnBox uses a subcommand pattern. Without a subcommand it prints usage informat
 
 ```sh
 BurnBox start [flags]
+BurnBox once [flags]
 BurnBox status [flags]
 BurnBox help
 ```
@@ -60,6 +61,18 @@ c.txt   untracked   -
 Entries shown as `untracked` are in the folder but have no first-seen time in the store yet (e.g. they appeared while BurnBox was not running); the daemon assigns them a first-seen time on its next start. Entries still in the store but missing from the folder are listed at the bottom and are pruned when the daemon next starts.
 
 BurnBox status --help shows this flag list.
+
+### `once`
+
+Does a single scan of the burnbox immediately, then exits: it records first-seen times for entries new to the store, prunes entries that have left the folder, and trashes (or deletes, with `--force`) every entry whose expiration has passed. It does not watch the folder afterwards.
+
+It accepts the same flags as `start` (`--folder`, `--expiration`, `--ignore`, `--force`, `--store`), creates the folder if missing, and uses the same store as the daemon, so it can be combined freely with `start` and `status`. This makes it suitable for a cron job or a scheduled task that runs BurnBox periodically instead of keeping a daemon alive:
+
+```sh
+BurnBox once --folder /tmp/drop --expiration 30m
+```
+
+BurnBox once --help shows this flag list.
 
 ## Run at startup
 

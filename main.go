@@ -188,6 +188,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 			log.Fatalf("%v", err)
 		}
 		return 0
+	case "once":
+		for _, a := range args[1:] {
+			if a == "-h" || a == "--help" {
+				printOnceUsage(stdout)
+				return 0
+			}
+		}
+		cfg, err := parseFlags(flag.CommandLine, args[1:])
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 2
+		}
+		log.Printf("BurnBox once: folder=%q expiration=%s ignore=%v force=%t store=%q",
+			cfg.Folder, cfg.Expiration, cfg.Ignore, cfg.Force, cfg.StorePath)
+		if err := runOnce(cfg); err != nil {
+			log.Fatalf("%v", err)
+		}
+		return 0
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
@@ -209,11 +227,30 @@ Commands:
                   (or delete) entries after their expiration
   status          report the entries in the burnbox and how long they
                   have until deletion
+  once            do a single scan of the burnbox now (sync the store,
+                  trash or delete expired entries) and exit
   help            show this help
 
 Passing "-h" or "--help" to any subcommand shows usage for that
 subcommand.
 `, filepath.Base(os.Args[0]))
+}
+
+// printOnceUsage writes the usage information for the once subcommand.
+func printOnceUsage(w io.Writer) {
+	fmt.Fprintf(w, `Usage: %s once [flags]
+
+Does a single scan of the burnbox immediately, then exits: it records
+first-seen times for new entries, prunes entries that have left the
+folder, and trashes or deletes every expired entry. It does not watch
+the folder afterwards.
+
+Flags:
+`, filepath.Base(os.Args[0]))
+	fs := flag.NewFlagSet("once", flag.ContinueOnError)
+	fs.SetOutput(w)
+	registerStartFlags(fs)
+	fs.PrintDefaults()
 }
 
 // printStartUsage writes the usage information for the start subcommand.
@@ -291,27 +328,11 @@ func parseFlags(fs *flag.FlagSet, args []string) (Config, error) {
 // and reaps expired entries. It returns when stop is closed (nil means
 // run forever) or when the watcher terminates.
 func runJanitor(cfg Config, stop <-chan struct{}) error {
-	// Make sure the watch folder exists.
-	if err := os.MkdirAll(cfg.Folder, 0o755); err != nil {
-		return fmt.Errorf("cannot use watch folder %q: %w", cfg.Folder, err)
-	}
-	abs, err := filepath.Abs(cfg.Folder)
+	cfg, err := prepareFolder(cfg)
 	if err != nil {
-		return fmt.Errorf("cannot resolve watch folder: %w", err)
+		return err
 	}
-	cfg.Folder = abs
 	log.Printf("watching: %s", cfg.Folder)
-
-	// Fail fast if trashing is required but no trash location is usable.
-	if cfg.Force {
-		log.Printf("force mode: trashing disabled, expired entries will be deleted directly")
-	} else {
-		desc, err := ensureTrashAvailable()
-		if err != nil {
-			return fmt.Errorf("no place to trash files: %w (use -force to delete instead)", err)
-		}
-		log.Printf("trash ready: %s", desc)
-	}
 
 	// Load the persistent store of first-seen times.
 	st, err := loadStore(cfg.StorePath)
@@ -319,36 +340,7 @@ func runJanitor(cfg Config, stop <-chan struct{}) error {
 		return fmt.Errorf("cannot load store: %w", err)
 	}
 
-	// Sync the store with what is currently in the folder: entries that
-	// were seen before keep their original first-seen time; entries new
-	// to BurnBox are first seen now. Anything in the store but no
-	// longer present in the folder is pruned.
-	present := make(map[string]bool)
-	if ents, err := os.ReadDir(cfg.Folder); err == nil {
-		for _, de := range ents {
-			name := de.Name()
-			present[name] = true
-			if shouldIgnore(cfg, name) {
-				continue
-			}
-			prev, known := st.firstSeen[name]
-			now := time.Now()
-			if err := st.seen(name, now); err != nil {
-				log.Printf("warning: cannot update store: %v", err)
-			}
-			if known {
-				log.Printf("existing: %q (first seen %s)", name, prev.Format(time.RFC3339))
-			} else {
-				log.Printf("new: %q (first seen %s, expires %s)",
-					name, now.Format(time.RFC3339), now.Add(cfg.Expiration).Format(time.RFC3339))
-			}
-		}
-	} else {
-		log.Printf("warning: cannot list %q: %v", cfg.Folder, err)
-	}
-	if err := st.prune(present); err != nil {
-		log.Printf("warning: cannot prune store: %v", err)
-	}
+	syncFolder(cfg, st)
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -402,6 +394,89 @@ func runJanitor(cfg Config, stop <-chan struct{}) error {
 			return nil
 		}
 	}
+}
+
+// prepareFolder makes sure the watch folder exists, resolves it to an
+// absolute path, and verifies that a trash location is usable unless
+// force mode is enabled. It returns the config with the resolved folder.
+func prepareFolder(cfg Config) (Config, error) {
+	// Make sure the watch folder exists.
+	if err := os.MkdirAll(cfg.Folder, 0o755); err != nil {
+		return cfg, fmt.Errorf("cannot use watch folder %q: %w", cfg.Folder, err)
+	}
+	abs, err := filepath.Abs(cfg.Folder)
+	if err != nil {
+		return cfg, fmt.Errorf("cannot resolve watch folder: %w", err)
+	}
+	cfg.Folder = abs
+
+	// Fail fast if trashing is required but no trash location is usable.
+	if cfg.Force {
+		log.Printf("force mode: trashing disabled, expired entries will be deleted directly")
+	} else {
+		desc, err := ensureTrashAvailable()
+		if err != nil {
+			return cfg, fmt.Errorf("no place to trash files: %w (use -force to delete instead)", err)
+		}
+		log.Printf("trash ready: %s", desc)
+	}
+	return cfg, nil
+}
+
+// syncFolder syncs the store with what is currently in the folder:
+// entries that were seen before keep their original first-seen time;
+// entries new to BurnBox are first seen now. Anything in the store but
+// no longer present in the folder is pruned.
+func syncFolder(cfg Config, st *store) {
+	present := make(map[string]bool)
+	if ents, err := os.ReadDir(cfg.Folder); err == nil {
+		for _, de := range ents {
+			name := de.Name()
+			present[name] = true
+			if shouldIgnore(cfg, name) {
+				continue
+			}
+			prev, known := st.firstSeen[name]
+			now := time.Now()
+			if err := st.seen(name, now); err != nil {
+				log.Printf("warning: cannot update store: %v", err)
+			}
+			if known {
+				log.Printf("existing: %q (first seen %s)", name, prev.Format(time.RFC3339))
+			} else {
+				log.Printf("new: %q (first seen %s, expires %s)",
+					name, now.Format(time.RFC3339), now.Add(cfg.Expiration).Format(time.RFC3339))
+			}
+		}
+	} else {
+		log.Printf("warning: cannot list %q: %v", cfg.Folder, err)
+	}
+	if err := st.prune(present); err != nil {
+		log.Printf("warning: cannot prune store: %v", err)
+	}
+}
+
+// runOnce implements the "once" subcommand: it performs a single scan
+// of the burnbox immediately (sync the store, reap expired entries)
+// and then returns without watching the folder.
+func runOnce(cfg Config) error {
+	cfg, err := prepareFolder(cfg)
+	if err != nil {
+		return err
+	}
+	log.Printf("scanning: %s", cfg.Folder)
+
+	st, err := loadStore(cfg.StorePath)
+	if err != nil {
+		return fmt.Errorf("cannot load store: %w", err)
+	}
+
+	syncFolder(cfg, st)
+
+	for name, firstSeen := range st.expired(cfg.Expiration, time.Now()) {
+		handleExpired(cfg, st, name, firstSeen)
+	}
+	return nil
 }
 
 // defaultStorePath returns the default location of the first-seen store:
