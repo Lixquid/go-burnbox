@@ -10,6 +10,8 @@ Expired entries are sent to the system trash:
 | macOS | Trash (Finder via AppleScript) |
 | Linux | freedesktop.org Trash (`~/.local/share/Trash` or `$XDG_DATA_HOME/Trash`) |
 
+While the daemon runs, a timer checks for expired entries on a fixed interval rather than exactly when each entry expires. The interval is derived from the `--expiration` duration: it is one quarter of `--expiration`, clamped to between 100ms and one minute. For the default 24-hour expiration, that means a check roughly every minute; short expirations are checked as often as every 100ms. Entries are therefore removed within one interval of expiring, at most.
+
 ## Usage
 
 BurnBox uses a subcommand pattern. Without a subcommand it prints usage information. The daemon only starts when you explicitly use the `start` subcommand. Passing `-h` or `--help` to any subcommand shows usage for that subcommand:
